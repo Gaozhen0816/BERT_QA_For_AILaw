@@ -35,27 +35,27 @@ FLAGS = flags.FLAGS
 
 ## Required parameters
 flags.DEFINE_string(
-    "bert_config_file", None,
+    "bert_config_file", "../chinese_L-12_H-768_A-12/bert_config.json",
     "The config json file corresponding to the pre-trained BERT model. "
     "This specifies the model architecture.")
 
-flags.DEFINE_string("vocab_file", None,
+flags.DEFINE_string("vocab_file", "../chinese_L-12_H-768_A-12/vocab.txt",
                     "The vocabulary file that the BERT model was trained on.")
 
 flags.DEFINE_string(
-    "output_dir", None,
+    "output_dir", "out_put",
     "The output directory where the model checkpoints will be written.")
 
 ## Other parameters
-flags.DEFINE_string("train_file", None,
+flags.DEFINE_string("train_file", "../data/qa_train.json",
                     "SQuAD json for training. E.g., train-v1.1.json")
 
 flags.DEFINE_string(
-    "predict_file", None,
+    "predict_file", "../data/qa_eval.json",
     "SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
 
 flags.DEFINE_string(
-    "init_checkpoint", None,
+    "init_checkpoint", "../chinese_L-12_H-768_A-12/bert_model.ckpt",
     "Initial checkpoint (usually from a pre-trained BERT model).")
 
 flags.DEFINE_bool(
@@ -75,11 +75,11 @@ flags.DEFINE_integer(
     "take between chunks.")
 
 flags.DEFINE_integer(
-    "max_query_length", 64,
+    "max_query_length", 47,
     "The maximum number of tokens for the question. Questions longer than "
     "this will be truncated to this length.")
 
-flags.DEFINE_bool("do_train", False, "Whether to run training.")
+flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
 flags.DEFINE_bool("do_predict", False, "Whether to run eval on the dev set.")
 
@@ -146,7 +146,7 @@ flags.DEFINE_bool(
     "A number of warnings are expected for a normal SQuAD evaluation.")
 
 flags.DEFINE_bool(
-    "version_2_with_negative", False,
+    "version_2_with_negative", True,
     "If true, the SQuAD examples contain some that do not have an answer.")
 
 flags.DEFINE_float(
@@ -224,8 +224,9 @@ class InputFeatures(object):
     self.is_impossible = is_impossible
 
 
-def read_squad_examples(input_file, is_training):
+def read_squad_examples(input_file, tokenizer, is_training):
   """Read a SQuAD json file into a list of SquadExample."""
+  import unicodedata
   with tf.gfile.Open(input_file, "r") as reader:
     input_data = json.load(reader)["data"]
 
@@ -236,23 +237,29 @@ def read_squad_examples(input_file, is_training):
 
   examples = []
   for entry in input_data:
-    for paragraph in entry["paragraphs"]:
-      paragraph_text = paragraph["context"]
-      doc_tokens = []
-      char_to_word_offset = []
-      prev_is_whitespace = True
-      for c in paragraph_text:
-        if is_whitespace(c):
-          prev_is_whitespace = True
-        else:
-          if prev_is_whitespace:
-            doc_tokens.append(c)
-          else:
-            doc_tokens[-1] += c
-          prev_is_whitespace = False
-        char_to_word_offset.append(len(doc_tokens) - 1)
+      doc_text = entry["context"]
+      # doc_tokens = []
+      # char_to_word_offset = []
+      # prev_is_whitespace = True
+      # for c in doc_text:
+      #   if is_whitespace(c):
+      #     prev_is_whitespace = True
+      #   else:
+      #     if prev_is_whitespace:
+      #       doc_tokens.append(c)
+      #     else:
+      #       doc_tokens[-1] += c
+      #     prev_is_whitespace = False
+      #   char_to_word_offset.append(len(doc_tokens) - 1)
+      doc_tokens = tokenizer.basic_tokenizer.tokenize(doc_text)
+      char_to_word_offset = {}
+      start = 0
+      for idx, token in enumerate(doc_tokens):
+          for _ in token:
+              char_to_word_offset[start] = idx
+              start += 1
 
-      for qa in paragraph["qas"]:
+      for qa in entry["qas"]:
         qas_id = qa["id"]
         question_text = qa["question"]
         start_position = None
@@ -264,30 +271,38 @@ def read_squad_examples(input_file, is_training):
           if FLAGS.version_2_with_negative:
             is_impossible = qa["is_impossible"]
           if (len(qa["answers"]) != 1) and (not is_impossible):
-            raise ValueError(
-                "For training, each question should have exactly 1 answer.")
+            # raise ValueError(
+            #     "For training, each question should have exactly 1 answer.")
+            pass
           if not is_impossible:
             answer = qa["answers"][0]
             orig_answer_text = answer["text"]
-            answer_offset = answer["answer_start"]
-            answer_length = len(orig_answer_text)
-            start_position = char_to_word_offset[answer_offset]
-            end_position = char_to_word_offset[answer_offset + answer_length -
-                                               1]
+            # answer_offset = answer["answer_start"]
+            # answer_length = len(orig_answer_text)
+            cleaned_answer_text = "".join(tokenizer.basic_tokenizer.tokenize(orig_answer_text))
+            ori_start_position = "".join(doc_tokens).find(cleaned_answer_text)
+            if ori_start_position == -1:
+                tf.logging.warning("Could not find answer: '%s' vs. '%s'", ''.join(doc_tokens), cleaned_answer_text)
+                continue
+            ori_end_position = ori_start_position + len(cleaned_answer_text) - 1
+            start_position = char_to_word_offset[ori_start_position]
+            try:
+                end_position = char_to_word_offset[ori_end_position]
+            except KeyError:
+                continue
             # Only add answers where the text can be exactly recovered from the
             # document. If this CAN'T happen it's likely due to weird Unicode
             # stuff so we will just skip the example.
             #
             # Note that this means for training mode, every example is NOT
             # guaranteed to be preserved.
-            actual_text = " ".join(
+            actual_text = "".join(
                 doc_tokens[start_position:(end_position + 1)])
-            cleaned_answer_text = " ".join(
-                tokenization.whitespace_tokenize(orig_answer_text))
-            if actual_text.find(cleaned_answer_text) == -1:
+            if actual_text != cleaned_answer_text:
               tf.logging.warning("Could not find answer: '%s' vs. '%s'",
                                  actual_text, cleaned_answer_text)
-              continue
+
+            orig_answer_text = cleaned_answer_text
           else:
             start_position = -1
             end_position = -1
@@ -1156,7 +1171,7 @@ def main(_):
   num_warmup_steps = None
   if FLAGS.do_train:
     train_examples = read_squad_examples(
-        input_file=FLAGS.train_file, is_training=True)
+        input_file=FLAGS.train_file, tokenizer=tokenizer, is_training=True)
     num_train_steps = int(
         len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
     num_warmup_steps = int(num_train_steps * FLAGS.warmup_proportion)
@@ -1216,7 +1231,7 @@ def main(_):
 
   if FLAGS.do_predict:
     eval_examples = read_squad_examples(
-        input_file=FLAGS.predict_file, is_training=False)
+        input_file=FLAGS.predict_file, tokenizer=tokenizer, is_training=False)
 
     eval_writer = FeatureWriter(
         filename=os.path.join(FLAGS.output_dir, "eval.tf_record"),
